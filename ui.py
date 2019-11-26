@@ -87,6 +87,7 @@ class DBFillerWidget(QWidget):
         self.amount_input_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
         self.amount_input = QSpinBox()
         self.amount_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.amount_input.setMaximum(1000)
         self.amount_layout.addWidget(self.amount_input_label)
         self.amount_layout.addWidget(self.amount_input)
         self.leftSideLayout.addLayout(self.amount_layout)
@@ -256,6 +257,7 @@ class DBFillerWidget(QWidget):
         msg.setText("%d successful insert(s)" % succ_counter)
         msg.open()
 
+    # noinspection SpellCheckingInspection
     def get_random_user_data(self):
         output = {}
         url = "https://randomuser.me/api"
