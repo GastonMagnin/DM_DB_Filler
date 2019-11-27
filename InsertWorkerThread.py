@@ -67,7 +67,12 @@ class InsertWorkerThread(QThread):
                     x = re.search("^random\((.*)\)", vals[i])
                     if x is not None:
                         stuff = x.group(1).split(".")
-                        cursor.execute("SELECT %s FROM %s" % (stuff[1], stuff[0]))
+                        if len(stuff) > 2:
+                            sql = "SELECT %s FROM %s WHERE %s" % (stuff[1], stuff[0], stuff[2])
+                            print(sql)
+                            cursor.execute(sql)
+                        else:
+                            cursor.execute("SELECT %s FROM %s" % (stuff[1], stuff[0]))
                         data.append(cursor.fetchall())
 
                     # generate and execute the sql
@@ -115,7 +120,11 @@ class InsertWorkerThread(QThread):
             if re.search("^random\(getuserdata\)$", vals[i]) is not None:
                 newvals.append(user_data[columns[i]])
             # check for random(gibberish)
-            elif re.search("^random\((gibberish)\)", vals[i]) is not None:
+            elif re.search("^random\(gibberish(?:\[([0-9]*)[,:-]([0-9]*)\])?\)", vals[i]) is not None:
+                x = re.search("^random\(gibberish(?:\[([0-9]*)[,:-]([0-9]*)\])?\)", vals[i])
+                if x.group(1) is not None and x.group(2) is not None:
+                    newvals.append(self.get_gibberish(int(x.group(1)), int(x.group(2))))
+                    continue
                 newvals.append(self.get_gibberish())
             # check for random(rand_number[])
             elif re.search("^random\(rand_number\[([0-9]*)[,-:]([0-9]*)\]\)", vals[i]) is not None:
@@ -170,13 +179,13 @@ class InsertWorkerThread(QThread):
         output["bio"] = self.get_gibberish()
         return output
 
-    def get_gibberish(self):
+    def get_gibberish(self, num=15, num2=25):
         """
         Gets gibberish text from an api
         :return: String containing gibberish text
         """
         # build request
-        url = "https://www.randomtext.me/api/gibberish/p-1/15-25"
+        url = f"https://www.randomtext.me/api/gibberish/p-1/{num}-{num2}"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:70.0) Gecko/20100101 Firefox/70.0"})
         # get json from api
