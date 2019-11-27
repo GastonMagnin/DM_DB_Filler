@@ -5,29 +5,13 @@ import random
 import sys
 import urllib.request
 # noinspection PyUnresolvedReferences
+from PySide2.QtCore import QThread, SIGNAL, Slot
+
 import resources
 import mysql.connector
 from PySide2.QtWidgets import *
 from PySide2.QtGui import QIcon
-
-
-def insert_factory(table_name, vals, rows, data=None, user_data=None):
-    counter = 0
-    newvals = []
-    for i in range(len(vals)):
-        if re.search("^random\(getuserdata\)$", vals[i]) is not None:
-            newvals.append(user_data[rows[i]])
-        elif re.search("^random\((.*)\)", vals[i]) is not None:
-            # [0] cursor fetchall returns tuples
-            newvals.append(str(data[counter][random.randint(0, len(data[counter]) - 1)][0]))
-            counter += 1
-        else:
-            newvals.append(vals[i])
-    sql = "INSERT INTO %s%s VALUES (%s)" % (
-        table_name, "" if not rows else "(" + (",".join(rows)) + ")", ", ".join("\"%s\"" % x for x in newvals))
-    print(sql)
-    return sql
-
+from InsertWorkerThread import InsertWorkerThread
 
 class DBFillerWidget(QWidget):
 
@@ -87,7 +71,7 @@ class DBFillerWidget(QWidget):
         self.amount_input_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
         self.amount_input = QSpinBox()
         self.amount_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.amount_input.setMaximum(1000)
+        self.amount_input.setRange(1, 1000)
         self.amount_layout.addWidget(self.amount_input_label)
         self.amount_layout.addWidget(self.amount_input)
         self.leftSideLayout.addLayout(self.amount_layout)
@@ -114,12 +98,16 @@ class DBFillerWidget(QWidget):
         self.rightSideLayout.addWidget(self.data_table)
         self.db_data = None
         # connect
-        self.connect_to_database()
+        # self.connect_to_database()
         # shortcuts
         self.table_shortcut = QShortcut("Alt+t", self)
         self.table_shortcut.activated.connect(self.table_name_input.setFocus)
         self.connect_shortcut = QShortcut("Alt+c", self)
         self.connect_shortcut.activated.connect(self.connect_to_database)
+        # threads
+        self.worker_thread = None
+
+
 
     def connect_to_database(self):
         status, data = DBInputDialog.get_data(self)
@@ -136,7 +124,6 @@ class DBFillerWidget(QWidget):
                 return
             self.connection_bar.setValue(0)
             with closing(mysql.connector.connect(**data)) as db:
-                print("test")
                 # fill bar
                 self.connection_bar.setValue(100)
                 cursor = db.cursor()
@@ -162,6 +149,7 @@ class DBFillerWidget(QWidget):
                 cursor.execute(sql)
                 data = cursor.fetchall()
         except:
+            self.connection_bar.setValue(0)
             # show error and return
             QErrorMessage(self).showMessage("Connection failed")
             return
@@ -212,50 +200,61 @@ class DBFillerWidget(QWidget):
         rows = []
         data = []
         user_data = []
+        keywords = ["gibberish", "rand_number"]
         # create db connection
-        try:
-            with closing(mysql.connector.connect(**self.db_data)) as db:
-                cursor = db.cursor()
-                # get values of non-empty lineedits and their labels
-                for i in range(self.row_layout.rowCount()):
-                    if self.row_layout.itemAt(i, QFormLayout.FieldRole).widget().displayText() != "":
-                        rows.append(self.row_layout.itemAt(i, QFormLayout.LabelRole).widget().text())
-                        vals.append(self.row_layout.itemAt(i, QFormLayout.FieldRole).widget().displayText())
-                # check for special inputs and append the right data
-                for i in range(len(vals)):
-                    y = re.search("^random\(getuserdata\)$", vals[i])
-                    if y is not None:
-                        if not user_data:
-                            for j in range(self.amount_input.value()):
-                                user_data.append(self.get_random_user_data())
-                        continue
-                    x = re.search("^random\((.*)\)", vals[i])
-                    if x is not None:
-                        stuff = x.group(1).split(".")
-                        cursor.execute("SELECT %s FROM %s" % (stuff[1], stuff[0]))
-                        data.append(cursor.fetchall())
-                # generate and execute the sql
-                for i in range(self.amount_input.value()):
-                    self.connection_bar.setValue(0)
-                    try:
-                        if user_data:
-                            cursor.execute(insert_factory(table_name, vals, rows, data, user_data[i]))
-                        else:
-                            cursor.execute(insert_factory(table_name, vals, rows, data))
-                        succ_counter += 1
-                    except Exception as e:
-                        print(x)
-                    self.connection_bar.setValue(100)
-                db.commit()
-                self.connection_bar.setValue(0)
-        except:
-            # show error and return
-            QErrorMessage(self).showMessage("Connection failed")
-            return
-        # show how many successful inserts there were
+        for i in range(self.row_layout.rowCount()):
+            if self.row_layout.itemAt(i, QFormLayout.FieldRole).widget().displayText() != "":
+                rows.append(self.row_layout.itemAt(i, QFormLayout.LabelRole).widget().text())
+                vals.append(self.row_layout.itemAt(i, QFormLayout.FieldRole).widget().displayText())
+        self.start_worker_thread(table_name, vals, rows, self.amount_input.value())
+        self.disable_inserts(True)
+        return
+
+
+    def start_worker_thread(self, table_name, vals, rows, amount):
+        self.connection_bar.setValue(0)
+        self.connection_bar.setMaximum(amount)
+        self.worker_thread = InsertWorkerThread()
+        self.worker_thread.set_data(self.db_data, table_name, vals, rows, amount)
+        self.worker_thread.inserts_done.connect(self.worker_thread_finished)
+        self.worker_thread.current_progress.connect(self.update_progress_bar)
+        self.worker_thread.start()
+    @Slot (int)
+    def update_progress_bar(self, p):
+        self.connection_bar.setValue(p)
+
+    @Slot (int)
+    def worker_thread_finished(self, amount):
+        self.disable_inserts(False)
         msg = QMessageBox(self)
-        msg.setText("%d successful insert(s)" % succ_counter)
+        msg.setText("%d successful insert(s)" % amount)
         msg.open()
+
+    def disable_inserts(self, bool):
+        self.insert_button.setDisabled(bool)
+        self.amount_input.setDisabled(bool)
+        self.table_input.setDisabled(bool)
+    def insert_factory(self, table_name, vals, rows, data=None, user_data=None):
+        counter = 0
+        newvals = []
+        for i in range(len(vals)):
+            if re.search("^random\(getuserdata\)$", vals[i]) is not None:
+                newvals.append(user_data[rows[i]])
+            elif re.search("^random\((gibberish)\)", vals[i]) is not None:
+                newvals.append(self.get_gibberish())
+            elif re.search("^random\(rand_number\[([0-9]*)[,-:]([0-9]*)\]\)", vals[i]) is not None:
+                x = re.search("^random\(rand_number\[([0-9]*)[,-:]([0-9]*)\]\)", vals[i])
+                newvals.append(str(random.randint(int(x.group(1)), int(x.group(2)))))
+            elif re.search("^random\((.*)\)", vals[i]) is not None:
+                # [0] cursor fetchall returns tuples
+                newvals.append(str(data[counter][random.randint(0, len(data[counter]) - 1)][0]))
+                counter += 1
+            else:
+                newvals.append(vals[i])
+        sql = "INSERT INTO %s%s VALUES (%s)" % (
+            table_name, "" if not rows else "(" + (",".join(rows)) + ")", ", ".join("\"%s\"" % x for x in newvals))
+        print(sql)
+        return sql
 
     # noinspection SpellCheckingInspection
     def get_random_user_data(self):
@@ -266,7 +265,7 @@ class DBFillerWidget(QWidget):
             with urllib.request.urlopen(req) as data:
                 user_data = json.loads(data.read())["results"][0]
         except Exception as e:
-            print(e)
+            print(e.with_traceback())
             return
         output["handle"] = user_data["login"]["username"][0:15]
         output["anzeigename"] = " ".join(list(user_data["name"].values())[1:])
@@ -291,8 +290,19 @@ class DBFillerWidget(QWidget):
             print(e)
             return
         output["bio"] = xdict["text_out"][3:-5]
-        print("got here")
         return output
+
+    def get_gibberish(self):
+        url = "https://www.randomtext.me/api/gibberish/p-1/15-25"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:70.0) Gecko/20100101 Firefox/70.0"})
+        try:
+            with urllib.request.urlopen(req) as x:
+                xdict = json.loads(x.read())
+        except Exception as e:
+            print(e.with_traceback())
+            return
+        return xdict["text_out"][3:-5]
 
 
 class DBInputDialog(QDialog):
@@ -343,9 +353,12 @@ class DBInputDialog(QDialog):
         return data
 
 
+
+
 if __name__ == "__main__":
     app = QApplication([])
     app.setStyle(QStyleFactory.create("Fusion"))
     widget = DBFillerWidget()
     widget.show()
+    widget.connect_to_database()
     sys.exit(app.exec_())
